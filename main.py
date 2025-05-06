@@ -10,7 +10,8 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TRIGGER_KEY = os.getenv("TRIGGER_KEY")
 
-GRAPHQL_URL = "https://www.mlb.com/api/graphql"
+GRAPHQL_URL = "https://bifrost-api.mlb.com/api/graphql
+"
 
 # Raw GraphQL query string
 GRAPHQL_QUERY = """
