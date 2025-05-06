@@ -25,19 +25,36 @@ with open("copy_bank.json", "r") as f:
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 print("🎬 Condensed Game Bot: 6AM UK delivery")
 
-# 🔍 Find most recent Giants gamePk
+# 🔍 Find most recent completed Giants gamePk
 def get_latest_giants_gamepk():
-    yesterday = (datetime.now(ZoneInfo("Europe/London")) - timedelta(days=1)).strftime("%Y-%m-%d")
-    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=137&date={yesterday}"
+    now_uk = datetime.now(ZoneInfo("Europe/London"))
+    start_date = (now_uk - timedelta(days=3)).strftime("%Y-%m-%d")
+    end_date = now_uk.strftime("%Y-%m-%d")
+
+    url = (
+        f"https://statsapi.mlb.com/api/v1/schedule"
+        f"?sportId=1&teamId=137&startDate={start_date}&endDate={end_date}"
+    )
     res = requests.get(url)
     if res.status_code != 200:
         logging.error("❌ Failed to fetch schedule.")
         return None
 
     dates = res.json().get("dates", [])
-    if dates and dates[0].get("games"):
-        return dates[0]["games"][0]["gamePk"]
-    return None
+    all_games = []
+    for date in dates:
+        for game in date.get("games", []):
+            if game.get("status", {}).get("detailedState") == "Final":
+                all_games.append((game["gameDate"], game["gamePk"]))
+
+    if not all_games:
+        logging.info("🛑 No recent completed Giants games found.")
+        return None
+
+    # Sort by game date and return the most recent gamePk
+    most_recent_game = sorted(all_games, key=lambda x: x[0])[-1]
+    logging.info(f"🧩 Latest completed gamePk: {most_recent_game[1]}")
+    return most_recent_game[1]
 
 # 🎥 Find condensed game video
 def find_condensed_game_video(game_pk):
@@ -52,11 +69,9 @@ def find_condensed_game_video(game_pk):
         title = video.get("title", "").lower()
         description = video.get("description", "").lower()
         if "condensed" in title or "condensed" in description:
-            # Prefer MP4
             for playback in video.get("playbacks", []):
                 if "mp4" in playback.get("name", "").lower():
                     return video["title"], playback["url"]
-            # Fallback to player page
             return video["title"], f"https://www.mlb.com{video.get('url', '')}"
     logging.info("No condensed video found.")
     return None, None
@@ -100,7 +115,7 @@ def send_telegram_message(title, url):
 def run_bot():
     game_pk = get_latest_giants_gamepk()
     if not game_pk:
-        logging.info("🛑 No Giants game found yesterday.")
+        logging.info("🛑 No Giants game found.")
         return
 
     posted = get_posted_games()
@@ -113,6 +128,7 @@ def run_bot():
         logging.info("🛑 No condensed video to post.")
         return
 
+    logging.info(f"🎥 Found condensed video: {title} → {url}")
     send_telegram_message(title, url)
     save_posted_game(str(game_pk))
 
