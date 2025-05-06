@@ -100,7 +100,7 @@ def save_posted_game(game_pk):
         f.write(f"{game_pk}\n")
     logging.info(f"💾 Saved gamePk: {game_pk}")
 
-# 🚀 Send to Telegram with cleaner formatting
+# 🚀 Send to Telegram
 def send_telegram_message(title, url):
     if title.lower().startswith("condensed game: "):
         game_info = title[17:].strip()
@@ -158,9 +158,9 @@ app = Flask(__name__)
 @app.route('/')
 def home():
     now_uk = datetime.now(ZoneInfo("Europe/London"))
-    if 6 <= now_uk.hour < 7:
+    if 6 <= now_uk.hour < 9:
         run_bot()
-        return "✅ Bot ran during 6AM window.\n"
+        return "✅ Bot ran during 6–9AM window.\n"
     return "✅ Bot awake but outside scan window.\n"
 
 @app.route('/ping')
@@ -182,6 +182,27 @@ def debug():
         logging.info("🚨 DEBUG MODE: Forcing post regardless of history.")
         run_bot(skip_posted_check=True)
         return "✅ Debug run completed (forced post).\n"
+    return "❌ Unauthorized.\n"
+
+@app.route('/log')
+def show_log():
+    try:
+        with open("posted_games.txt", "r") as f:
+            content = f.read()
+            return f"<pre>{content}</pre>" if content else "📂 Log is empty."
+    except FileNotFoundError:
+        return "📂 No posted_games.txt yet."
+
+@app.route('/reset')
+def reset_log():
+    key = request.args.get("key")
+    if key == SECRET_KEY:
+        try:
+            open("posted_games.txt", "w").close()
+            logging.info("🧹 Log manually cleared via /reset.")
+            return "🧹 Log reset successfully.\n"
+        except Exception as e:
+            return f"❌ Failed to reset log: {e}\n"
     return "❌ Unauthorized.\n"
 
 if __name__ == "__main__":
