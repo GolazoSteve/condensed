@@ -57,11 +57,15 @@ def send_telegram_message(title, url):
         logging.error(f"❌ Telegram error: {res.text}")
 
 def search_all_video_sections(content, game_id):
+    media = content.get("media") or {}
+    editorial = content.get("editorial") or {}
+    highlights = content.get("highlights") or {}
+
     sections = [
-        ("media.epg", content.get("media", {}).get("epg", [])),
-        ("media.milestones.items", content.get("media", {}).get("milestones", {}).get("items", [])),
-        ("media.editorial.recap.mlb.items", content.get("editorial", {}).get("recap", {}).get("mlb", {}).get("items", [])),
-        ("highlights.featured.items", content.get("highlights", {}).get("featured", {}).get("items", [])),
+        ("media.epg", media.get("epg", [])),
+        ("media.milestones.items", (media.get("milestones") or {}).get("items", [])),
+        ("media.editorial.recap.mlb.items", (editorial.get("recap", {}).get("mlb") or {}).get("items", [])),
+        ("highlights.featured.items", (highlights.get("featured") or {}).get("items", [])),
     ]
 
     for section_name, items in sections:
