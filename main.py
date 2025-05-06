@@ -87,7 +87,8 @@ def search_all_video_sections(content, game_id):
     return False
 
 def fallback_scrape_condensed_game(date_str):
-    url = f"https://www.mlb.com/live-stream-games/{date_str}"
+    year, month, day = date_str.split("-")
+    url = f"https://www.mlb.com/live-stream-games/{year}/{month}/{day}"
     logging.info(f"🌐 Scraping fallback page: {url}")
     try:
         res = requests.get(url, timeout=10)
