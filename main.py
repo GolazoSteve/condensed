@@ -33,6 +33,21 @@ def get_giants_game_pk(date_str):
                 return game.get("gamePk")
     return None
 
+def extract_preloaded_state(html):
+    soup = BeautifulSoup(html, "html.parser")
+    script_tags = soup.find_all("script")
+
+    for tag in script_tags:
+        if tag.string and "window.__PRELOADED_STATE__" in tag.string:
+            try:
+                match = re.search(r"window\.__PRELOADED_STATE__\s*=\s*(\{.*\});", tag.string, re.DOTALL)
+                if match:
+                    json_text = match.group(1)
+                    return json.loads(json_text)
+            except Exception as e:
+                print(f"❌ Failed to parse PRELOADED_STATE: {e}")
+    return None
+
 def find_condensed_game_url(game_pk):
     video_page_url = f"https://www.mlb.com/gameday/{game_pk}/video"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -41,20 +56,20 @@ def find_condensed_game_url(game_pk):
         print(f"⚠️ Failed to load video page: {video_page_url}")
         return None
 
-    soup = BeautifulSoup(response.text, "html.parser")
-    scripts = soup.find_all("script", type="application/ld+json")
-    for script in scripts:
-        try:
-            data = json.loads(script.string)
-            if isinstance(data, dict) and data.get("@type") == "VideoObject":
-                title = data.get("name", "").lower()
-                if "condensed" in title:
-                    print(f"🎯 Found condensed video: {title}")
-                    return data.get("contentUrl")
-        except (json.JSONDecodeError, TypeError):
-            continue
+    state = extract_preloaded_state(response.text)
+    if not state:
+        print("❌ No PRELOADED_STATE found.")
+        return None
 
-    print("❌ No condensed game video found in JSON.")
+    media_items = state.get("mediaPlayback", {}).get("items", [])
+    for item in media_items:
+        title = item.get("title", "").lower()
+        playback_url = item.get("playbacks", [{}])[0].get("url", "")
+        if "condensed" in title and playback_url:
+            print(f"🎯 Found condensed game: {title}")
+            return playback_url
+
+    print("😅 No condensed game video found in PRELOADED_STATE.")
     return None
 
 def send_telegram_message(message):
