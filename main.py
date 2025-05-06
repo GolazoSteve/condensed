@@ -87,23 +87,24 @@ def search_all_video_sections(content, game_id):
     return False
 
 def fallback_scrape_condensed_game(date_str):
-    year, month, day = date_str.split("-")
-    url = f"https://www.mlb.com/live-stream-games/{year}/{month}/{day}"
-    logging.info(f"🌐 Scraping fallback page: {url}")
+    logging.info("🌐 Scraping fallback video search page for condensed game.")
     try:
-        res = requests.get(url, timeout=10)
+        search_url = "https://www.mlb.com/video/search?teamId=137&searchText=condensed+game"
+        res = requests.get(search_url, timeout=10)
         res.raise_for_status()
         soup = BeautifulSoup(res.text, "html.parser")
 
         links = soup.find_all("a", href=True)
         for link in links:
-            text = link.get_text(strip=True).lower()
             href = link["href"]
-            if "condensed game" in text and "giants" in text and href.startswith("https://"):
-                logging.info(f"🕸️ Fallback found condensed game: {href}")
-                send_telegram_message("Condensed Game (scraped)", href)
+            text = link.get_text(strip=True).lower()
+            if "condensed" in href and "giants" in href:
+                full_url = f"https://www.mlb.com{href}" if href.startswith("/") else href
+                logging.info(f"🕸️ Fallback found condensed game: {full_url}")
+                send_telegram_message("Condensed Game (scraped)", full_url)
                 save_posted_game(f"scrape-{date_str}")
                 return True
+
     except Exception as e:
         logging.error(f"❌ Scrape failed: {e}")
     return False
