@@ -100,23 +100,30 @@ def save_posted_game(game_pk):
         f.write(f"{game_pk}\n")
     logging.info(f"💾 Saved gamePk: {game_pk}")
 
-# 🚀 Send to Telegram
+# 🚀 Send to Telegram with cleaner formatting
 def send_telegram_message(title, url):
+    if title.lower().startswith("condensed game: "):
+        game_info = title[17:].strip()
+    else:
+        game_info = title.strip()
+
     message = (
-        f"🎞 <b>{title}</b>\n\n"
-        f"Watch the condensed game here:\n"
-        f"👉 <a href=\"{url}\">{url}</a>\n\n"
+        f"<b>📼 {game_info}</b>\n"
+        f"<code>────────────────────────────</code>\n"
+        f"🎥 <a href=\"{url}\">▶ Watch Condensed Game</a>\n\n"
         f"<i>{random.choice(COPY_LINES)}</i>"
     )
+
     res = requests.post(
         f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
         data={
             "chat_id": CHAT_ID,
             "text": message,
             "parse_mode": "HTML",
-            "disable_web_page_preview": False
+            "disable_web_page_preview": True
         }
     )
+
     if res.status_code == 200:
         logging.info("✅ Sent to Telegram.")
     else:
