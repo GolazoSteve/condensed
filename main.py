@@ -1,7 +1,7 @@
 import os
 import requests
 from flask import Flask, request
-from datetime import datetime, timedelta
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -11,47 +11,35 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TRIGGER_KEY = os.getenv("TRIGGER_KEY")
 
-def get_yesterday_date():
-    uk_now = datetime.utcnow() + timedelta(hours=1)
-    yesterday = uk_now - timedelta(days=1)
-    return yesterday.strftime("%Y-%m-%d")
+GIANTS_VIDEO_URL = "https://www.mlb.com/giants/video"
 
-def get_giants_game_pk(date_str):
-    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={date_str}"
-    response = requests.get(url)
+def find_condensed_game_url():
+    headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(GIANTS_VIDEO_URL, headers=headers)
     if response.status_code != 200:
+        print(f"⚠️ Failed to fetch Giants video page: {response.status_code}")
         return None
-    data = response.json()
-    for date in data.get("dates", []):
-        for game in date.get("games", []):
-            teams = game.get("teams", {})
-            if teams.get("away", {}).get("team", {}).get("name") == "San Francisco Giants" or \
-               teams.get("home", {}).get("team", {}).get("name") == "San Francisco Giants":
-                return game.get("gamePk")
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    cards = soup.find_all("a", class_="media-card-block")
+
+    found_any = False
+    for card in cards:
+        title = card.get("aria-label", "") or card.get("title", "")
+        href = card.get("href", "")
+        if title:
+            print(f"🔍 Found video: {title}")
+        if "condensed game" in title.lower():
+            url = f"https://www.mlb.com{href}" if href.startswith("/") else href
+            print(f"🎯 Found condensed game: {title} — {url}")
+            return url
+        found_any = True
+
+    if not found_any:
+        print("❌ No videos found on the page.")
+    else:
+        print("😅 No condensed game found today.")
     return None
-
-def find_video_links(game_pk):
-    api_url = f"https://bdfed.stitch.mlbinfra.com/bdfed/milestone/v1/{game_pk}/en"
-    response = requests.get(api_url)
-    if response.status_code != 200:
-        print(f"⚠️ Failed to load video API: {api_url}")
-        return []
-
-    data = response.json()
-    found = []
-
-    for item in data.get("milestones", []):
-        title = item.get("headline", "No title")
-        keywords = ", ".join(item.get("keywordsOnMilestone", []))
-        playbacks = item.get("playbacks", [])
-        mp4s = [p["url"] for p in playbacks if p["url"].endswith(".mp4")]
-
-        if mp4s:
-            url = mp4s[0]  # Just grab the first one
-            found.append((title, url, keywords))
-            print(f"📹 {title} — {keywords}\n🔗 {url}\n")
-
-    return found
 
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -68,24 +56,13 @@ def index():
     if key != TRIGGER_KEY:
         return "Forbidden", 403
 
-    date = get_yesterday_date()
-    print("📅 Checking for Giants condensed game on", date)
-    game_pk = get_giants_game_pk(date)
-    if not game_pk:
-        print("❌ No Giants game found.")
-        return "No Giants game found", 200
+    print("🧼 Scraping Giants video page for condensed game...")
+    condensed_url = find_condensed_game_url()
+    if not condensed_url:
+        return "No condensed game found", 200
 
-    videos = find_video_links(game_pk)
-    if not videos:
-        return "No videos found for this game", 200
-
-    for title, url, keywords in videos:
-        if "condensed" in title.lower() or "condensed game" in keywords.lower():
-            sent = send_telegram_message(f"🎥 Giants Condensed Game:\n{url}")
-            return "Posted to Telegram" if sent else "Failed to post to Telegram", 200
-
-    print("😅 Videos found, but no condensed game.")
-    return "No condensed game video found", 200
+    sent = send_telegram_message(f"🎥 Giants Condensed Game:\n{condensed_url}")
+    return "Posted to Telegram" if sent else "Failed to post to Telegram", 200
 
 if __name__ == "__main__":
     app.run(debug=True)
