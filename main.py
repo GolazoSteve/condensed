@@ -1,10 +1,7 @@
 import os
-import re
-import json
 import requests
 from flask import Flask, request
 from datetime import datetime, timedelta
-from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -33,44 +30,28 @@ def get_giants_game_pk(date_str):
                 return game.get("gamePk")
     return None
 
-def extract_preloaded_state(html):
-    soup = BeautifulSoup(html, "html.parser")
-    script_tags = soup.find_all("script")
-
-    for tag in script_tags:
-        if tag.string and "window.__PRELOADED_STATE__" in tag.string:
-            try:
-                match = re.search(r"window\.__PRELOADED_STATE__\s*=\s*(\{.*\});", tag.string, re.DOTALL)
-                if match:
-                    json_text = match.group(1)
-                    return json.loads(json_text)
-            except Exception as e:
-                print(f"❌ Failed to parse PRELOADED_STATE: {e}")
-    return None
-
-def find_condensed_game_url(game_pk):
-    video_page_url = f"https://www.mlb.com/gameday/{game_pk}/video"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(video_page_url, headers=headers)
+def find_video_links(game_pk):
+    api_url = f"https://bdfed.stitch.mlbinfra.com/bdfed/milestone/v1/{game_pk}/en"
+    response = requests.get(api_url)
     if response.status_code != 200:
-        print(f"⚠️ Failed to load video page: {video_page_url}")
-        return None
+        print(f"⚠️ Failed to load video API: {api_url}")
+        return []
 
-    state = extract_preloaded_state(response.text)
-    if not state:
-        print("❌ No PRELOADED_STATE found.")
-        return None
+    data = response.json()
+    found = []
 
-    media_items = state.get("mediaPlayback", {}).get("items", [])
-    for item in media_items:
-        title = item.get("title", "").lower()
-        playback_url = item.get("playbacks", [{}])[0].get("url", "")
-        if "condensed" in title and playback_url:
-            print(f"🎯 Found condensed game: {title}")
-            return playback_url
+    for item in data.get("milestones", []):
+        title = item.get("headline", "No title")
+        keywords = ", ".join(item.get("keywordsOnMilestone", []))
+        playbacks = item.get("playbacks", [])
+        mp4s = [p["url"] for p in playbacks if p["url"].endswith(".mp4")]
 
-    print("😅 No condensed game video found in PRELOADED_STATE.")
-    return None
+        if mp4s:
+            url = mp4s[0]  # Just grab the first one
+            found.append((title, url, keywords))
+            print(f"📹 {title} — {keywords}\n🔗 {url}\n")
+
+    return found
 
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -94,12 +75,17 @@ def index():
         print("❌ No Giants game found.")
         return "No Giants game found", 200
 
-    video_url = find_condensed_game_url(game_pk)
-    if not video_url:
-        return "No condensed game link found", 200
+    videos = find_video_links(game_pk)
+    if not videos:
+        return "No videos found for this game", 200
 
-    sent = send_telegram_message(f"🎥 Giants Condensed Game:\n{video_url}")
-    return "Posted to Telegram" if sent else "Failed to post to Telegram", 200
+    for title, url, keywords in videos:
+        if "condensed" in title.lower() or "condensed game" in keywords.lower():
+            sent = send_telegram_message(f"🎥 Giants Condensed Game:\n{url}")
+            return "Posted to Telegram" if sent else "Failed to post to Telegram", 200
+
+    print("😅 Videos found, but no condensed game.")
+    return "No condensed game video found", 200
 
 if __name__ == "__main__":
     app.run(debug=True)
