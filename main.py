@@ -1,91 +1,88 @@
 import os
-import requests
 import logging
+import requests
 from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
 from flask import Flask, request
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SECRET_KEY = os.getenv("SECRET_KEY")
 
-MLB_STATS_API = "https://statsapi.mlb.com/api/v1/schedule"
-MLB_VIDEO_PAGE = "https://www.mlb.com/gameday/{gamePk}/video"
-
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger()
+
 app = Flask(__name__)
 
-
-def get_giants_gamepk(date_str):
-    params = {
-        "sportId": 1,
-        "date": date_str,
-        "teamId": 137,  # Giants team ID
-    }
-    res = requests.get(MLB_STATS_API, params=params)
-    res.raise_for_status()
-    data = res.json()
-    dates = data.get("dates", [])
-    if not dates:
-        return None
-    games = dates[0].get("games", [])
-    if not games:
-        return None
-    return games[0].get("gamePk")
-
-
-def find_condensed_game_url(gamePk):
-    url = MLB_VIDEO_PAGE.format(gamePk=gamePk)
-    res = requests.get(url)
-    res.raise_for_status()
-    soup = BeautifulSoup(res.text, "html.parser")
-    for a in soup.find_all("a", href=True):
-        text = a.get_text().lower()
-        alt = a.get("aria-label", "").lower()
-        if "condensed game" in text or "condensed game" in alt:
-            return "https://www.mlb.com" + a["href"]
+def get_giants_game_pk(date_str):
+    url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={date_str}"
+    response = requests.get(url)
+    data = response.json()
+    for date in data.get("dates", []):
+        for game in date.get("games", []):
+            teams = game.get("teams", {})
+            if teams.get("away", {}).get("team", {}).get("name") == "San Francisco Giants" or \
+               teams.get("home", {}).get("team", {}).get("name") == "San Francisco Giants":
+                return game.get("gamePk")
     return None
 
+def scrape_gameday_video_page(game_pk):
+    url = f"https://www.mlb.com/gameday/{game_pk}/video"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.85 Safari/537.36"
+    }
+    response = requests.get(url, headers=headers)
+    if response.status_code != 200:
+        logger.warning(f"⚠️ Failed to load video page: {url}")
+        return None
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    for link in soup.find_all("a", href=True):
+        text = link.get_text(" ", strip=True).lower()
+        aria = (link.get("aria-label") or "").lower()
+        alt = (link.get("alt") or "").lower()
+        title = (link.get("title") or "").lower()
+        if "condensed game" in text or "condensed game" in aria or "condensed game" in alt or "condensed game" in title:
+            href = link["href"]
+            full_url = f"https://www.mlb.com{href}" if href.startswith("/") else href
+            return full_url
+
+    logger.warning("❌ No condensed game link found on video page.")
+    return None
 
 def send_telegram_message(text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
-    res = requests.post(url, json=payload)
-    res.raise_for_status()
-
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "disable_web_page_preview": False,
+    }
+    response = requests.post(url, json=payload)
+    return response.ok
 
 @app.route("/")
 def home():
     key = request.args.get("key")
     if key != SECRET_KEY:
-        return "Access denied", 403
+        return "Forbidden", 403
 
-    today = datetime.utcnow().date() - timedelta(days=1)
-    date_str = today.strftime("%Y-%m-%d")
-    logging.info(f"📅 Checking for Giants condensed game on {date_str}")
+    yesterday = datetime.utcnow() - timedelta(days=1)
+    date_str = yesterday.strftime("%Y-%m-%d")
+    logger.info(f"📅 Checking for Giants condensed game on {date_str}")
 
-    try:
-        gamePk = get_giants_gamepk(date_str)
-        if not gamePk:
-            logging.warning("❌ No gamePk found for Giants on that date.")
-            return "No game found", 200
+    game_pk = get_giants_game_pk(date_str)
+    if not game_pk:
+        return "No game found", 200
 
-        video_url = find_condensed_game_url(gamePk)
-        if video_url:
-            logging.info(f"✅ Found condensed game: {video_url}")
-            send_telegram_message(f"🎬 Giants condensed game ({date_str}): {video_url}")
-            return "Posted to Telegram", 200
-        else:
-            logging.warning("❌ No condensed game link found on video page.")
-            return "No condensed game video found", 200
-
-    except Exception as e:
-        logging.exception("🔥 Error during condensed game lookup")
-        return "Error occurred", 500
-
+    condensed_url = scrape_gameday_video_page(game_pk)
+    if condensed_url:
+        send_telegram_message(f"🎞️ Giants Condensed Game: {condensed_url}")
+        return "Posted", 200
+    else:
+        return "Not found", 200
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(debug=True, port=10000)
