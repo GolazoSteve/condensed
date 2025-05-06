@@ -110,7 +110,9 @@ def fetch_condensed_game():
                     save_posted_game(game_id)
                     return
 
-    logging.info("❌ No condensed game video found.")
+    logging.info("❌ No condensed game video found in media/epg data for this game.")
+logging.debug(json.dumps(items, indent=2))  # <-- Optional: logs the raw EPG structure
+
 
 @app.route('/')
 def home():
