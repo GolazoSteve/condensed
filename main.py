@@ -56,24 +56,36 @@ def get_latest_giants_gamepk():
     logging.info(f"🧩 Latest completed gamePk: {most_recent_game[1]}")
     return most_recent_game[1]
 
-# 🎥 Find condensed game video
+# 🎥 Find condensed game video (restored original logic)
 def find_condensed_game_video(game_pk):
     url = f"https://statsapi.mlb.com/api/v1/game/{game_pk}/content"
-    res = requests.get(url)
-    if res.status_code != 200:
-        logging.error(f"❌ Failed to fetch content for gamePk {game_pk}")
+    response = requests.get(url)
+    if response.status_code != 200:
+        logging.error(f"Failed to fetch content for gamePk {game_pk}")
         return None, None
 
-    videos = res.json().get("highlights", {}).get("highlights", {}).get("items", [])
+    data = response.json()
+    videos = data.get("highlights", {}).get("highlights", {}).get("items", [])
+
     for video in videos:
         title = video.get("title", "").lower()
         description = video.get("description", "").lower()
+
         if "condensed" in title or "condensed" in description:
+            playback_url = None
+
             for playback in video.get("playbacks", []):
                 if "mp4" in playback.get("name", "").lower():
-                    return video["title"], playback["url"]
-            return video["title"], f"https://www.mlb.com{video.get('url', '')}"
-    logging.info("No condensed video found.")
+                    playback_url = playback.get("url")
+                    break
+
+            if not playback_url:
+                playback_url = f"https://www.mlb.com{video.get('url', '')}"
+
+            logging.info(f"🎬 Found Condensed Game Video:\nTitle: {video['title']}\nURL: {playback_url}")
+            return video["title"], playback_url
+
+    logging.info("No condensed game video found.")
     return None, None
 
 # 🧠 Post tracker
@@ -128,7 +140,6 @@ def run_bot():
         logging.info("🛑 No condensed video to post.")
         return
 
-    logging.info(f"🎥 Found condensed video: {title} → {url}")
     send_telegram_message(title, url)
     save_posted_game(str(game_pk))
 
