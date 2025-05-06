@@ -5,6 +5,7 @@ import random
 import logging
 from datetime import datetime, timedelta
 from flask import Flask, request
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from zoneinfo import ZoneInfo
 
@@ -13,7 +14,6 @@ load_dotenv()
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 SECRET_KEY = os.getenv("SECRET_KEY")
-
 POSTED_GAMES_FILE = "posted_games.txt"
 
 with open("copy_bank.json", "r") as f:
@@ -86,6 +86,27 @@ def search_all_video_sections(content, game_id):
                     return True
     return False
 
+def fallback_scrape_condensed_game(date_str):
+    url = f"https://www.mlb.com/live-stream-games/{date_str}"
+    logging.info(f"🌐 Scraping fallback page: {url}")
+    try:
+        res = requests.get(url, timeout=10)
+        res.raise_for_status()
+        soup = BeautifulSoup(res.text, "html.parser")
+
+        links = soup.find_all("a", href=True)
+        for link in links:
+            text = link.get_text(strip=True).lower()
+            href = link["href"]
+            if "condensed game" in text and "giants" in text and href.startswith("https://"):
+                logging.info(f"🕸️ Fallback found condensed game: {href}")
+                send_telegram_message("Condensed Game (scraped)", href)
+                save_posted_game(f"scrape-{date_str}")
+                return True
+    except Exception as e:
+        logging.error(f"❌ Scrape failed: {e}")
+    return False
+
 def fetch_condensed_game():
     now_uk = datetime.now(ZoneInfo("Europe/London"))
     date_str = (now_uk - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -119,7 +140,9 @@ def fetch_condensed_game():
     found = search_all_video_sections(content, game_id)
 
     if not found:
-        logging.info("❌ No condensed game video found in any section.")
+        logging.info("❌ No condensed game video found in API. Trying fallback scraper...")
+        if not fallback_scrape_condensed_game(date_str):
+            logging.info("❌ No condensed game found via scrape either.")
 
 @app.route('/')
 def home():
