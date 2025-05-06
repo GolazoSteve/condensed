@@ -12,25 +12,40 @@ TRIGGER_KEY = os.getenv("TRIGGER_KEY")
 
 GRAPHQL_URL = "https://www.mlb.com/api/graphql/query"
 
+# Raw GraphQL query string
+GRAPHQL_QUERY = """
+query VideoSearch($query: String!, $page: Int!, $pageSize: Int!, $sortOrder: String!, $filters: VideoSearchFilters) {
+  videos(query: $query, page: $page, pageSize: $pageSize, sortOrder: $sortOrder, filters: $filters) {
+    results {
+      title
+      slug
+      keywords
+    }
+  }
+}
+"""
+
 def find_condensed_game_video():
-    variables = {
-        "query": "giants condensed",
-        "page": 1,
-        "pageSize": 20,
-        "sortOrder": "desc",
-        "filters": {
-            "team_id": "137"  # Giants team ID
+    payload = {
+        "operationName": "VideoSearch",
+        "query": GRAPHQL_QUERY,
+        "variables": {
+            "query": "giants condensed",
+            "page": 1,
+            "pageSize": 25,
+            "sortOrder": "desc",
+            "filters": {
+                "team_id": "137"  # San Francisco Giants team ID
+            }
         }
     }
 
-    params = {
-        "operationName": "VideoSearch",
-        "variables": str(variables).replace("'", '"'),
-        "extensions": '{"persistedQuery":{"version":1,"sha256Hash":"c6ec99db878d8b9985d8e3f2b5a46067b09a6b12e71a8ed580dc58352fdf1e23"}}'
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0"
     }
 
-    headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(GRAPHQL_URL, params=params, headers=headers)
+    response = requests.post(GRAPHQL_URL, json=payload, headers=headers)
 
     if response.status_code != 200:
         print(f"❌ GraphQL request failed: {response.status_code}")
@@ -47,7 +62,6 @@ def find_condensed_game_video():
         title = vid.get("title", "")
         slug = vid.get("slug", "")
         keywords = ", ".join(vid.get("keywords", []))
-
         print(f"📹 {title} — {keywords}")
         if "condensed" in title.lower() or "condensed" in keywords.lower():
             url = f"https://www.mlb.com/video/{slug}"
@@ -72,7 +86,7 @@ def index():
     if key != TRIGGER_KEY:
         return "Forbidden", 403
 
-    print("🧼 Searching Giants videos via GraphQL...")
+    print("🧼 Searching Giants videos via raw GraphQL POST...")
     video_url = find_condensed_game_video()
     if not video_url:
         return "No condensed game found", 200
