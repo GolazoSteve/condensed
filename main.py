@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import requests
 from flask import Flask, request
 from datetime import datetime, timedelta
@@ -11,6 +12,7 @@ app = Flask(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TRIGGER_KEY = os.getenv("TRIGGER_KEY")
 
 def get_yesterday_date():
     uk_now = datetime.utcnow() + timedelta(hours=1)
@@ -33,19 +35,27 @@ def get_giants_game_pk(date_str):
 
 def find_condensed_game_url(game_pk):
     video_page_url = f"https://www.mlb.com/gameday/{game_pk}/video"
-    response = requests.get(video_page_url)
+    headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(video_page_url, headers=headers)
     if response.status_code != 200:
         print(f"⚠️ Failed to load video page: {video_page_url}")
         return None
 
-    html = response.text
-    matches = re.findall(r'https://mlb-cuts-diamond\.mlb\.com/[^\s"]+?\.mp4', html)
-    if matches:
-        print(f"🎯 Found MP4: {matches[0]}")
-        return matches[0]
-    else:
-        print("❌ No .mp4 link found in video page HTML.")
-        return None
+    soup = BeautifulSoup(response.text, "html.parser")
+    scripts = soup.find_all("script", type="application/ld+json")
+    for script in scripts:
+        try:
+            data = json.loads(script.string)
+            if isinstance(data, dict) and data.get("@type") == "VideoObject":
+                title = data.get("name", "").lower()
+                if "condensed" in title:
+                    print(f"🎯 Found condensed video: {title}")
+                    return data.get("contentUrl")
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+    print("❌ No condensed game video found in JSON.")
+    return None
 
 def send_telegram_message(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -59,11 +69,11 @@ def send_telegram_message(message):
 @app.route("/", methods=["GET"])
 def index():
     key = request.args.get("key")
-    if key != os.getenv("TRIGGER_KEY"):
+    if key != TRIGGER_KEY:
         return "Forbidden", 403
 
-    print("📅 Checking for Giants condensed game on", get_yesterday_date())
     date = get_yesterday_date()
+    print("📅 Checking for Giants condensed game on", date)
     game_pk = get_giants_game_pk(date)
     if not game_pk:
         print("❌ No Giants game found.")
