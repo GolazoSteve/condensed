@@ -1,103 +1,88 @@
 import os
-import json
 import logging
-import requests
-from datetime import datetime
 from flask import Flask, request
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+logging.basicConfig(level=logging.INFO)
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-POST_KEY = os.getenv("POST_KEY")  # e.g. go_sfg
+SEARCH_API = "https://search-api.svc.mlb.com/svc/search/v2/mlb_global"
+MLB_VIDEO_DOMAIN = "https://www.mlb.com/video/"
 
-HEADERS = {
-    "Content-Type": "application/json",
-    "Origin": "https://www.mlb.com",
-    "Referer": "https://www.mlb.com/",
-    "User-Agent": "Mozilla/5.0"
-}
+posted_ids_file = "posted_video_ids.txt"
 
-SEARCH_URL = "https://search-api.svc.mlb.com/svc/search/v2/mlb_global"
+def load_posted_ids():
+    if not os.path.exists(posted_ids_file):
+        return set()
+    with open(posted_ids_file, "r") as f:
+        return set(line.strip() for line in f.readlines())
 
+def save_posted_id(video_id):
+    with open(posted_ids_file, "a") as f:
+        f.write(f"{video_id}\n")
 
-def find_giants_condensed_game():
-    logging.info("🎯 Searching MLB API for latest Giants condensed game...")
-    payload = {
-        "query": {
-            "term": {
-                "keywords": "giants condensed game"
-            }
-        },
-        "from": 0,
-        "size": 10,
-        "sort": {
-            "startDate": "desc"
-        },
-        "filters": {
-            "language": ["en"]
-        }
+def fetch_condensed_game():
+    params = {
+        "query": "condensed game",
+        "size": 25,
+        "page": 0,
+        "sort": "desc",
+        "searchContexts": "mlb-global"
     }
 
+    logging.info("🔍 Searching for recent videos with 'condensed game' in title...")
     try:
-        response = requests.post(SEARCH_URL, headers=HEADERS, json=payload)
+        response = requests.get(SEARCH_API, params=params, timeout=10)
         response.raise_for_status()
-        results = response.json().get("docs", [])
+        data = response.json()
+        docs = data.get("docs", [])
 
-        for doc in results:
+        posted_ids = load_posted_ids()
+        logging.info(f"📦 Found {len(docs)} video entries")
+        for doc in docs:
             title = doc.get("title", "").lower()
-            url = doc.get("url", "")
-            if "giants" in title and "condensed game" in title:
-                logging.info(f"✅ Found: {title} - {url}")
-                return url
+            href = doc.get("url")
+            doc_id = doc.get("id")
+            logging.info(f"🔎 Title: {title}")
 
-        logging.warning("❌ No suitable condensed game found in API results.")
-        return None
+            if "condensed game" in title and doc_id not in posted_ids:
+                full_url = f"{MLB_VIDEO_DOMAIN}{href}"
+                send_telegram_message(f"🎬 {title.title()}\n{full_url}")
+                save_posted_id(doc_id)
+                logging.info(f"✅ Sent: {title}")
+                return True
+
+        logging.info("❌ No new condensed game video found.")
+        return False
 
     except Exception as e:
-        logging.error(f"❌ API query failed: {e}")
-        return None
+        logging.error(f"🔥 Error fetching videos: {e}")
+        return False
 
-
-def post_to_telegram(video_url):
-    message = f"🎬 Giants Condensed Game is live:\n{video_url}"
-    telegram_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+def send_telegram_message(text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "disable_web_page_preview": False
+        "text": text,
+        "disable_web_page_preview": False,
     }
-
     try:
-        res = requests.post(telegram_url, json=payload)
-        res.raise_for_status()
-        logging.info("📣 Posted to Telegram.")
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        logging.error(f"❌ Telegram post failed: {e}")
+        logging.error(f"Failed to send Telegram message: {e}")
 
-
-@app.route("/")
+@app.route("/", methods=["GET"])
 def home():
-    secret = request.args.get("key", None)
-    if secret and secret == POST_KEY:
+    key = request.args.get("key")
+    if key == "go_sfg":
         logging.info("🔐 Secret override triggered.")
-        run_bot()
-        return "✅ Manual check triggered."
-    return "👋 Condensed Game Bot is online."
-
-
-def run_bot():
-    logging.info(f"📅 Checking for Giants condensed game on {datetime.utcnow().date()}")
-    video_url = find_giants_condensed_game()
-
-    if video_url:
-        post_to_telegram(video_url)
-    else:
-        logging.warning("❌ No video found to post.")
-
+        fetch_condensed_game()
+    return "🎥 Bot is ready.", 200
 
 if __name__ == "__main__":
-    app.run(debug=False)
+    app.run(debug=True)
