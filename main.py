@@ -51,12 +51,11 @@ def get_latest_giants_gamepk():
         logging.info("🛑 No recent completed Giants games found.")
         return None
 
-    # Sort by game date and return the most recent gamePk
     most_recent_game = sorted(all_games, key=lambda x: x[0])[-1]
     logging.info(f"🧩 Latest completed gamePk: {most_recent_game[1]}")
     return most_recent_game[1]
 
-# 🎥 Find condensed game video (restored original logic)
+# 🎥 Find condensed game video
 def find_condensed_game_video(game_pk):
     url = f"https://statsapi.mlb.com/api/v1/game/{game_pk}/content"
     response = requests.get(url)
@@ -124,16 +123,17 @@ def send_telegram_message(title, url):
         logging.error(f"❌ Telegram error: {res.text}")
 
 # 🍽 Main function
-def run_bot():
+def run_bot(skip_posted_check=False):
     game_pk = get_latest_giants_gamepk()
     if not game_pk:
         logging.info("🛑 No Giants game found.")
         return
 
-    posted = get_posted_games()
-    if str(game_pk) in posted:
-        logging.info("🛑 Already posted for this gamePk.")
-        return
+    if not skip_posted_check:
+        posted = get_posted_games()
+        if str(game_pk) in posted:
+            logging.info("🛑 Already posted for this gamePk.")
+            return
 
     title, url = find_condensed_game_video(game_pk)
     if not url:
@@ -141,7 +141,9 @@ def run_bot():
         return
 
     send_telegram_message(title, url)
-    save_posted_game(str(game_pk))
+
+    if not skip_posted_check:
+        save_posted_game(str(game_pk))
 
 # 🧭 Flask app
 app = Flask(__name__)
@@ -164,6 +166,15 @@ def secret():
     if key == SECRET_KEY:
         run_bot()
         return "✅ Secret triggered bot run.\n"
+    return "❌ Unauthorized.\n"
+
+@app.route('/debug')
+def debug():
+    key = request.args.get("key")
+    if key == SECRET_KEY:
+        logging.info("🚨 DEBUG MODE: Forcing post regardless of history.")
+        run_bot(skip_posted_check=True)
+        return "✅ Debug run completed (forced post).\n"
     return "❌ Unauthorized.\n"
 
 if __name__ == "__main__":
