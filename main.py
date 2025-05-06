@@ -5,7 +5,7 @@ import random
 import logging
 import smtplib
 from email.mime.text import MIMEText
-from email.mime.multipart import Mimemultipart
+from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
 from flask import Flask, request
 from dotenv import load_dotenv
