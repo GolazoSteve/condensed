@@ -1,98 +1,143 @@
 import os
 import requests
+import json
+import random
+import logging
+from datetime import datetime, timedelta
 from flask import Flask, request
 from dotenv import load_dotenv
+from zoneinfo import ZoneInfo
 
+# Load environment variables
 load_dotenv()
-app = Flask(__name__)
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+SECRET_KEY = os.getenv("SECRET_KEY")
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-TRIGGER_KEY = os.getenv("TRIGGER_KEY")
+# File to track posted games
+POSTED_GAMES_FILE = "posted_games.txt"
 
-GRAPHQL_URL = "https://bifrost-api.mlb.com/api/graphql"
+# Load copy bank
+with open("copy_bank.json", "r") as f:
+    COPY_LINES = json.load(f)["lines"]
 
-# Raw GraphQL query string
-GRAPHQL_QUERY = """
-query VideoSearch($query: String!, $page: Int!, $pageSize: Int!, $sortOrder: String!, $filters: VideoSearchFilters) {
-  videos(query: $query, page: $page, pageSize: $pageSize, sortOrder: $sortOrder, filters: $filters) {
-    results {
-      title
-      slug
-      keywords
-    }
-  }
-}
-"""
+# Logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+print("🎬 Condensed Game Bot: 6AM UK delivery")
 
-def find_condensed_game_video():
-    payload = {
-        "operationName": "VideoSearch",
-        "query": GRAPHQL_QUERY,
-        "variables": {
-            "query": "giants condensed",
-            "page": 1,
-            "pageSize": 25,
-            "sortOrder": "desc",
-            "filters": {
-                "team_id": "137"  # San Francisco Giants team ID
-            }
-        }
-    }
-
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    response = requests.post(GRAPHQL_URL, json=payload, headers=headers)
-
-    if response.status_code != 200:
-        print(f"❌ GraphQL request failed: {response.status_code}")
+# 🔍 Find most recent Giants gamePk
+def get_latest_giants_gamepk():
+    yesterday = (datetime.now(ZoneInfo("Europe/London")) - timedelta(days=1)).strftime("%Y-%m-%d")
+    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=137&date={yesterday}"
+    res = requests.get(url)
+    if res.status_code != 200:
+        logging.error("❌ Failed to fetch schedule.")
         return None
 
-    data = response.json()
-    videos = data.get("data", {}).get("videos", {}).get("results", [])
-
-    if not videos:
-        print("😐 No videos returned by GraphQL.")
-        return None
-
-    for vid in videos:
-        title = vid.get("title", "")
-        slug = vid.get("slug", "")
-        keywords = ", ".join(vid.get("keywords", []))
-        print(f"📹 {title} — {keywords}")
-        if "condensed" in title.lower() or "condensed" in keywords.lower():
-            url = f"https://www.mlb.com/video/{slug}"
-            print(f"🎯 Found condensed game: {title} — {url}")
-            return url
-
-    print("😅 No condensed game found in video search.")
+    dates = res.json().get("dates", [])
+    if dates and dates[0].get("games"):
+        return dates[0]["games"][0]["gamePk"]
     return None
 
-def send_telegram_message(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    data = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message
-    }
-    response = requests.post(url, data=data)
-    return response.status_code == 200
+# 🎥 Find condensed game video
+def find_condensed_game_video(game_pk):
+    url = f"https://statsapi.mlb.com/api/v1/game/{game_pk}/content"
+    res = requests.get(url)
+    if res.status_code != 200:
+        logging.error(f"❌ Failed to fetch content for gamePk {game_pk}")
+        return None, None
 
-@app.route("/", methods=["GET"])
-def index():
+    videos = res.json().get("highlights", {}).get("highlights", {}).get("items", [])
+    for video in videos:
+        title = video.get("title", "").lower()
+        description = video.get("description", "").lower()
+        if "condensed" in title or "condensed" in description:
+            # Prefer MP4
+            for playback in video.get("playbacks", []):
+                if "mp4" in playback.get("name", "").lower():
+                    return video["title"], playback["url"]
+            # Fallback to player page
+            return video["title"], f"https://www.mlb.com{video.get('url', '')}"
+    logging.info("No condensed video found.")
+    return None, None
+
+# 🧠 Post tracker
+def get_posted_games():
+    try:
+        with open(POSTED_GAMES_FILE, "r") as f:
+            return set(f.read().splitlines())
+    except FileNotFoundError:
+        return set()
+
+def save_posted_game(game_pk):
+    with open(POSTED_GAMES_FILE, "a") as f:
+        f.write(f"{game_pk}\n")
+    logging.info(f"💾 Saved gamePk: {game_pk}")
+
+# 🚀 Send to Telegram
+def send_telegram_message(title, url):
+    message = (
+        f"🎞 <b>{title}</b>\n\n"
+        f"Watch the condensed game here:\n"
+        f"👉 <a href=\"{url}\">{url}</a>\n\n"
+        f"<i>{random.choice(COPY_LINES)}</i>"
+    )
+    res = requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+        data={
+            "chat_id": CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": False
+        }
+    )
+    if res.status_code == 200:
+        logging.info("✅ Sent to Telegram.")
+    else:
+        logging.error(f"❌ Telegram error: {res.text}")
+
+# 🍽 Main function
+def run_bot():
+    game_pk = get_latest_giants_gamepk()
+    if not game_pk:
+        logging.info("🛑 No Giants game found yesterday.")
+        return
+
+    posted = get_posted_games()
+    if str(game_pk) in posted:
+        logging.info("🛑 Already posted for this gamePk.")
+        return
+
+    title, url = find_condensed_game_video(game_pk)
+    if not url:
+        logging.info("🛑 No condensed video to post.")
+        return
+
+    send_telegram_message(title, url)
+    save_posted_game(str(game_pk))
+
+# 🧭 Flask app
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    now_uk = datetime.now(ZoneInfo("Europe/London"))
+    if 6 <= now_uk.hour < 7:
+        run_bot()
+        return "✅ Bot ran during 6AM window.\n"
+    return "✅ Bot awake but outside scan window.\n"
+
+@app.route('/ping')
+def ping():
+    return "✅ Condensed Game Bot is alive.\n"
+
+@app.route('/secret')
+def secret():
     key = request.args.get("key")
-    if key != TRIGGER_KEY:
-        return "Forbidden", 403
-
-    print("🧼 Searching Giants videos via raw GraphQL POST...")
-    video_url = find_condensed_game_video()
-    if not video_url:
-        return "No condensed game found", 200
-
-    sent = send_telegram_message(f"🎥 Giants Condensed Game:\n{video_url}")
-    return "Posted to Telegram" if sent else "Failed to post to Telegram", 200
+    if key == SECRET_KEY:
+        run_bot()
+        return "✅ Secret triggered bot run.\n"
+    return "❌ Unauthorized.\n"
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="0.0.0.0", port=3000)
