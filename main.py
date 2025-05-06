@@ -97,22 +97,27 @@ def fetch_condensed_game():
         logging.error("❌ Failed to fetch game content.")
         return
 
-    items = res.json().get("media", {}).get("epg", [])
-    for section in items:
-        if section.get("title", "").lower() == "condensed game":
-            videos = section.get("items", [])
-            if videos:
-                video = videos[0]
-                title = video.get("title", "Condensed Game")
-                url = video.get("playbacks", [])[0].get("url")
-                if url:
-                    send_telegram_message(title, url)
-                    save_posted_game(game_id)
-                    return
+    items_found = False
+    epg_sections = res.json().get("media", {}).get("epg", [])
+    for section in epg_sections:
+        title = section.get("title", "").lower()
+        items = section.get("items", [])
 
-    logging.info("❌ No condensed game video found in media/epg data for this game.")
-logging.debug(json.dumps(items, indent=2))  # <-- Optional: logs the raw EPG structure
+        logging.info(f"🔍 Section: {title} — {len(items)} items")
+        logging.debug(json.dumps(items, indent=2))  # Safe now
 
+        if title == "condensed game" and items:
+            video = items[0]
+            video_title = video.get("title", "Condensed Game")
+            url = video.get("playbacks", [])[0].get("url")
+            if url:
+                send_telegram_message(video_title, url)
+                save_posted_game(game_id)
+                return
+            items_found = True
+
+    if not items_found:
+        logging.info("❌ No condensed game video found in media/epg data.")
 
 @app.route('/')
 def home():
