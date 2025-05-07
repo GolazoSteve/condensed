@@ -1,173 +1,159 @@
 import os
 import requests
+import unicodedata
+import json
+import random
 import logging
-import datetime
-import smtplib
+from datetime import datetime
 from flask import Flask, request
-from bs4 import BeautifulSoup
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+from dotenv import load_dotenv
+from zoneinfo import ZoneInfo
 
-# --- Config ---
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-EMAIL_SENDER = os.getenv("EMAIL_SENDER")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-EMAIL_BCC = os.getenv("EMAIL_BCC", "").split(",")
-BOT_KEY = os.getenv("BOT_KEY") or "go_sfg"
-POSTED_FILE = "posted_games.txt"
+# Load environment variables
+load_dotenv()
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
+SECRET_KEY = os.getenv("SECRET_KEY")
 
-# --- Flask App ---
+POSTED_VIDEOS_FILE = "posted_videos.txt"
+LAST_POSTED_DATE_FILE = "last_posted_date.txt"
+
+# Load copy bank
+with open("copy_bank.json", "r") as f:
+    copy_data = json.load(f)
+    COPY_LINES = copy_data["lines"]
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
+print("🎯 Breakfast Bot: Giants Highlights @ 6AM UK daily")
+
 app = Flask(__name__)
 
-# --- Logging ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
-# --- Helper Functions ---
-def get_games_by_date(date):
-    url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={date}"
-    response = requests.get(url)
-    if response.status_code != 200:
-        logging.error("Failed to fetch schedule data for %s", date)
-        return []
-    return response.json().get("dates", [])[0].get("games", [])
-
-def find_most_recent_giants_game_with_condensed():
-    today = datetime.date.today()
-    for delta in range(0, 5):  # Check today, yesterday, back 5 days max
-        date = (today - datetime.timedelta(days=delta)).isoformat()
-        games = get_games_by_date(date)
-        giants_games = [g for g in games if g.get("teams", {}).get("away", {}).get("team", {}).get("name") == "San Francisco Giants" or
-                                         g.get("teams", {}).get("home", {}).get("team", {}).get("name") == "San Francisco Giants"]
-        for game in reversed(giants_games):
-            game_pk = game.get("gamePk")
-            title, video_url = find_condensed_game_video_simple(game_pk)
-            if video_url:
-                return title, video_url, game_pk
-    return None, None, None
-
-def find_condensed_game_video_simple(game_pk):
-    url = f"https://statsapi.mlb.com/api/v1/game/{game_pk}/content"
-    response = requests.get(url)
-    if response.status_code != 200:
-        return None, None
-    data = response.json()
-    videos = data.get("highlights", {}).get("highlights", {}).get("items", [])
-    for video in videos:
-        title = video.get("title", "").lower()
-        description = video.get("description", "").lower()
-        if "condensed" in title or "condensed" in description:
-            for playback in video.get("playbacks", []):
-                if "1280x720" in playback.get("url", ""):
-                    return video.get("title"), playback.get("url")
-    return None, None
-
-def has_been_posted(game_pk):
-    if not os.path.exists(POSTED_FILE):
-        return False
-    with open(POSTED_FILE, "r") as f:
-        return str(game_pk) in f.read()
-
-def mark_as_posted(game_pk):
-    with open(POSTED_FILE, "a") as f:
-        f.write(f"{game_pk}\n")
-
-def send_telegram_message(title, video_url):
-    caption = f"📼 {title.replace('Condensed Game: ', '')}\n" + "─"*28 + "\n🎥 ▶ Watch Condensed Game\n\nEvery outfield assist feels fresher before 8 a.m.\n{video_url}"
+def send_telegram_message(title, url):
+    random_line = random.choice(COPY_LINES)
+    message = (
+        f"📺 <b>{title}</b>\n\n"
+        f"Watch now on YouTube:\n"
+        f"👉 <a href=\"{url}\">{url}</a>\n\n"
+        f"<i>{random_line}</i>"
+    )
+    api_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": caption,
+        "chat_id": CHAT_ID,
+        "text": message,
         "parse_mode": "HTML",
         "disable_web_page_preview": False
     }
-    endpoint = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    response = requests.post(endpoint, data=payload)
-    if not response.ok:
-        logging.error("Telegram error: %s", response.text)
-    else:
+    res = requests.post(api_url, data=payload)
+    if res.status_code == 200:
         logging.info("✅ Sent to Telegram.")
+    else:
+        logging.error(f"❌ Telegram error: {res.text}")
 
-def send_email(subject, video_url):
-    msg = MIMEMultipart()
-    msg['From'] = EMAIL_SENDER
-    msg['To'] = EMAIL_SENDER
-    msg['Subject'] = subject
-    if EMAIL_BCC:
-        msg['Bcc'] = ", ".join(EMAIL_BCC)
-    body = f"<h2>{subject}</h2><p><a href=\"{video_url}\">Watch the condensed game</a></p>"
-    msg.attach(MIMEText(body, 'html'))
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
-        server.send_message(msg)
-        logging.info("📧 Email sent.")
+def get_posted_videos():
+    try:
+        with open(POSTED_VIDEOS_FILE, "r") as f:
+            return set(f.read().splitlines())
+    except FileNotFoundError:
+        return set()
 
-def run_bot(skip_posted_check=False, skip_time_check=False):
-    now = datetime.datetime.now()
-    if not (6 <= now.hour < 9):
-        if not skip_time_check:
-            logging.info("⏱️ Outside 6-9am window.")
+def save_posted_video(video_id):
+    with open(POSTED_VIDEOS_FILE, "a") as f:
+        f.write(f"{video_id}\n")
+    logging.info(f"💾 Saved video ID: {video_id}")
+
+def get_last_posted_date():
+    try:
+        with open(LAST_POSTED_DATE_FILE, "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return None
+
+def save_last_posted_date(date_str):
+    with open(LAST_POSTED_DATE_FILE, "w") as f:
+        f.write(date_str)
+    logging.info(f"💾 Saved posted date: {date_str}")
+
+def fetch_giants_highlights(force=False):
+    now_uk = datetime.now(ZoneInfo("Europe/London"))
+    today_str = now_uk.strftime("%Y-%m-%d")
+    if not force and get_last_posted_date() == today_str:
+        logging.info("🛑 Already posted today — skipping YouTube search.")
+        return
+
+    posted_videos = get_posted_videos()
+
+    url = "https://www.googleapis.com/youtube/v3/search"
+    params = {
+        "key": YOUTUBE_API_KEY,
+        "channelId": "UCoLrcjPV5PbUrUyXq5mjc_A",
+        "part": "snippet",
+        "order": "date",
+        "maxResults": 25,
+        "type": "video"
+    }
+
+    res = requests.get(url, params=params)
+    logging.info(f"🌐 YouTube API called: {res.url}")
+    if res.status_code != 200:
+        logging.error("❌ YouTube API failed.")
+        return
+
+    data = res.json()
+    logging.info("🔍 Checking returned video titles for 'Giants' + 'Highlights':")
+    for item in data.get("items", []):
+        if item["id"]["kind"] != "youtube#video":
+            continue
+
+        title = item["snippet"]["title"]
+        clean_title = unicodedata.normalize("NFKD", title).strip().lower()
+        logging.info(f"- {title} → {clean_title}")
+
+        if "giants" in clean_title and "highlights" in clean_title:
+            video_id = item["id"]["videoId"]
+            if not force and video_id in posted_videos:
+                logging.info(f"⚪ Already posted video ID: {video_id}")
+                continue
+
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            logging.info("🎯 NEW GIANTS HIGHLIGHT FOUND!")
+            send_telegram_message(title, video_url)
+            save_posted_video(video_id)
+            save_last_posted_date(today_str)
             return
-        else:
-            logging.info("⏱️ Time window override active (debug mode).")
+    logging.info("❌ No new Giants highlights found.")
 
-    date = datetime.date.today().isoformat()
-    games = get_games_by_date(date)
-    completed_games = [g for g in games if g.get("status", {}).get("detailedState") == "Final"]
-    if not completed_games:
-        logging.info("No completed games yet")
-        return
-    game_pk = completed_games[-1].get("gamePk")
-    logging.info("🧩 Latest completed gamePk: %s", game_pk)
-    if not skip_posted_check and has_been_posted(game_pk):
-        logging.info("📂 Already posted for this game.")
-        return
-    title, video_url = find_condensed_game_video_simple(game_pk)
-    if not video_url:
-        logging.info("❌ No condensed game video found.")
-        return
-    logging.info("🎬 Found Condensed Game Video:\nTitle: %s\nURL: %s", title, video_url)
-    send_telegram_message(title, video_url)
-    send_email(title, video_url)
-    mark_as_posted(game_pk)
-
-# --- Routes ---
-@app.route("/")
+@app.route('/')
 def home():
-    return "Condensed Game Bot running!"
+    secret_key = request.args.get('key')
+    now_uk = datetime.now(ZoneInfo("Europe/London"))
+    current_hour = now_uk.hour
 
-@app.route("/debug")
-def debug():
-    key = request.args.get("key")
-    if key != BOT_KEY:
-        return "Forbidden", 403
-    logging.info("🚨 DEBUG MODE: Forcing post regardless of history.")
-    run_bot(skip_posted_check=True, skip_time_check=True)
-    return "Debug run complete."
+    if secret_key:
+        if secret_key == SECRET_KEY:
+            fetch_giants_highlights()
+            return "✅ Secret key accepted. Bot ran and checked highlights.\n"
+        else:
+            return "❌ Unauthorized.\n"
 
-@app.route("/force")
+    if 6 <= current_hour < 9:
+        fetch_giants_highlights()
+        return "✅ Breakfast Bot ran successfully (inside window).\n"
+    else:
+        return "✅ Breakfast Bot awake, but outside scan window.\n"
+
+@app.route('/force')
 def force():
-    key = request.args.get("key")
-    if key != BOT_KEY:
-        return "Forbidden", 403
-    logging.info("🚨 FORCE MODE: Fetching most recent game with condensed video, ignoring 'Final' status.")
-    title, video_url, game_pk = find_most_recent_giants_game_with_condensed()
-    if not video_url:
-        logging.info("❌ No condensed game found for any Giants game.")
-        return "No condensed game found.", 404
-    send_telegram_message(title, video_url)
-    send_email(title, video_url)
-    mark_as_posted(game_pk)
-    return "Forced post complete."
+    key = request.args.get('key')
+    if key != SECRET_KEY:
+        return "❌ Unauthorized.\n", 401
+    logging.info("🚨 FORCE MODE: Ignoring posted date check.")
+    fetch_giants_highlights(force=True)
+    return "✅ Force check completed.\n"
 
-@app.route("/reset")
-def reset():
-    key = request.args.get("reset")
-    if key != BOT_KEY:
-        return "Forbidden", 403
-    if os.path.exists(POSTED_FILE):
-        os.remove(POSTED_FILE)
-    return "posted_games.txt reset."
-
-@app.route("/ping")
+@app.route('/ping')
 def ping():
-    return "OK"
+    return "✅ Breakfast Bot is awake.\n"
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=3000)
