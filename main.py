@@ -1,4 +1,4 @@
-import os
+import os 
 import requests
 import logging
 import datetime
@@ -46,7 +46,7 @@ def find_condensed_game_video(game_pk):
     response = requests.get(url)
     if response.status_code != 200:
         logging.error("Failed to fetch content for gamePk %s", game_pk)
-        return None, None
+        return None, None, None
     data = response.json()
     videos = data.get("highlights", {}).get("highlights", {}).get("items", [])
     for video in videos:
@@ -55,8 +55,8 @@ def find_condensed_game_video(game_pk):
         if "condensed" in title or "condensed" in description:
             for playback in video.get("playbacks", []):
                 if "1280x720" in playback.get("url", ""):
-                    return video.get("title"), playback.get("url")
-    return None, None
+                    return video.get("title"), playback.get("url"), None
+    return None, None, None
 
 def has_been_posted(game_pk):
     if not os.path.exists(POSTED_FILE):
@@ -68,22 +68,27 @@ def mark_as_posted(game_pk):
     with open(POSTED_FILE, "a") as f:
         f.write(f"{game_pk}\n")
 
-def send_telegram_message(title, video_url):
-    message = f"📼 {title.replace('Condensed Game: ', '')}\n" + "─"*28 + f"\n🎥 ▶ Watch Condensed Game:\n{video_url}\n\nEvery outfield assist feels fresher before 8 a.m."
+def send_telegram_message(title, video_url, image_url=None):
+    caption = f"📼 {title.replace('Condensed Game: ', '')}\n" + "─"*28 + "\n🎥 ▶ Watch Condensed Game\n\nEvery outfield assist feels fresher before 8 a.m."
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
+        "caption": caption,
         "parse_mode": "HTML",
         "disable_web_page_preview": False
     }
-    endpoint = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    if image_url:
+        payload["photo"] = image_url
+        endpoint = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    else:
+        payload["text"] = caption + f"\n{video_url}"
+        endpoint = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     response = requests.post(endpoint, data=payload)
     if not response.ok:
         logging.error("Telegram error: %s", response.text)
     else:
         logging.info("✅ Sent to Telegram.")
 
-def send_email(subject, video_url):
+def send_email(subject, video_url, image_url=None):
     msg = MIMEMultipart()
     msg['From'] = EMAIL_SENDER
     msg['To'] = EMAIL_SENDER
@@ -114,7 +119,7 @@ def run_bot(skip_posted_check=False, skip_time_check=False):
         logging.info("📂 Already posted for this game.")
         return
 
-    title, video_url = find_condensed_game_video(game_pk)
+    title, video_url, _ = find_condensed_game_video(game_pk)
     if not video_url:
         logging.info("❌ No condensed game video found.")
         return
@@ -150,3 +155,34 @@ def reset():
 @app.route("/ping")
 def ping():
     return "OK"
+
+@app.route("/force")
+def force():
+    key = request.args.get("key")
+    if key != BOT_KEY:
+        return "Forbidden", 403
+    logging.info("🚨 FORCE MODE: Fetching most recent game with condensed video, ignoring 'Final' status.")
+
+    today = datetime.date.today().isoformat()
+    url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={today}"
+    response = requests.get(url)
+    if response.status_code != 200:
+        logging.error("Failed to fetch schedule data")
+        return "Schedule fetch failed", 500
+    games = response.json().get("dates", [])[0].get("games", [])
+    if not games:
+        logging.info("No games found for today")
+        return "No games today", 404
+
+    for game in reversed(games):
+        game_pk = game.get("gamePk")
+        title, video_url, _ = find_condensed_game_video(game_pk)
+        if video_url:
+            logging.info("🎯 Condensed video found for gamePk: %s", game_pk)
+            send_telegram_message(title, video_url)
+            send_email(title, video_url)
+            mark_as_posted(game_pk)
+            return f"Posted condensed game for gamePk {game_pk}", 200
+
+    logging.info("❌ No condensed game found for any game today.")
+    return "No condensed game found", 404
