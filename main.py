@@ -178,6 +178,24 @@ def debug():
         return "✅ Debug run completed (forced post).\n"
     return "❌ Unauthorized.\n"
 
+@app.route('/force-latest')
+def force_latest():
+    key = request.args.get("key")
+    if key != SECRET_KEY:
+        return "❌ Unauthorized.\n"
+
+    game_pk = get_latest_giants_gamepk()
+    if not game_pk:
+        return "🛑 No recent Giants game found.\n"
+
+    title, url = find_condensed_game_video(game_pk)
+    if not url:
+        return "🛑 Condensed video not found for latest game.\n"
+
+    send_telegram_message(title, url)
+    logging.info(f"🚀 Forced condensed game post for gamePk: {game_pk}")
+    return "✅ Forced post sent to Telegram.\n"
+
 @app.route('/log')
 def show_log():
     try:
