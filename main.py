@@ -1,135 +1,94 @@
+from flask import Flask, request
 import os
 import requests
+import re
+from datetime import datetime, timedelta
 import logging
-import datetime
-from flask import Flask, request
+from dotenv import load_dotenv
 
-# --- Config ---
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-BOT_KEY = os.getenv("BOT_KEY") or "go_sfg"
-POSTED_FILE = "posted_games.txt"
+load_dotenv()
 
-# --- Flask App ---
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
 
-# --- Logging ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+DEBUG_KEY = os.getenv("DEBUG_KEY", "go_sfg")
 
-# --- Helper Functions ---
-def get_latest_game_pk():
-    today = datetime.date.today().isoformat()
-    url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={today}"
-    response = requests.get(url)
-    if response.status_code != 200:
-        logging.error("Failed to fetch schedule data")
+
+def get_recent_giants_game_pk():
+    today = datetime.utcnow().date()
+    for delta in range(3):
+        check_date = today - timedelta(days=delta)
+        url = f"https://statsapi.mlb.com/api/v1/schedule?teamId=137&date={check_date}"
+        resp = requests.get(url)
+        if resp.status_code != 200:
+            continue
+        data = resp.json()
+        games = data.get("dates", [{}])[0].get("games", [])
+        for game in games:
+            if game.get("status", {}).get("abstractGameCode") == "F":
+                return game.get("gamePk")
+    return None
+
+
+def get_condensed_game_url(game_pk):
+    video_page_url = f"https://www.mlb.com/gameday/{game_pk}/video"
+    resp = requests.get(video_page_url)
+    if resp.status_code != 200:
         return None
-    dates = response.json().get("dates", [])
-    if not dates:
-        logging.info("No games found for today")
+
+    match = re.search(r'"playbacks":\s*\[(.*?)\]', resp.text, re.DOTALL)
+    if not match:
         return None
-    games = dates[0].get("games", [])
-    completed_games = [g for g in games if g.get("status", {}).get("detailedState") == "Final"]
-    if not completed_games:
-        logging.info("No completed games yet")
-        return None
-    return completed_games[-1].get("gamePk")
 
-def find_condensed_game_video(game_pk):
-    url = f"https://statsapi.mlb.com/api/v1/game/{game_pk}/content"
-    response = requests.get(url)
-    if response.status_code != 200:
-        logging.error("Failed to fetch content for gamePk %s", game_pk)
-        return None, None
-    data = response.json()
-    videos = data.get("highlights", {}).get("highlights", {}).get("items", [])
-    for video in videos:
-        title = video.get("title", "").lower()
-        description = video.get("description", "").lower()
-        if "condensed" in title or "condensed" in description:
-            for playback in video.get("playbacks", []):
-                if "1280x720" in playback.get("url", ""):
-                    return video.get("title"), playback.get("url")
-    return None, None
-
-def has_been_posted(game_pk):
-    if not os.path.exists(POSTED_FILE):
-        return False
-    with open(POSTED_FILE, "r") as f:
-        return str(game_pk) in f.read()
-
-def mark_as_posted(game_pk):
-    with open(POSTED_FILE, "a") as f:
-        f.write(f"{game_pk}\n")
-
-def send_telegram_message(title, video_url):
-    caption = (
-        f"📼 {title.replace('Condensed Game: ', '')}\n"
-        + "─" * 28
-        + f"\n🎥 ▶ <a href=\"{video_url}\">Watch Condensed Game</a>\n\n"
-        + "Every outfield assist feels fresher before 8 a.m."
+    playbacks_raw = match.group(1)
+    condensed_match = re.search(
+        r'"name":"Condensed Game".*?"url":"(https:[^"]+\.mp4)"', playbacks_raw
     )
+    if condensed_match:
+        return condensed_match.group(1).replace("\\u002F", "/")
+    return None
+
+
+def post_to_telegram(text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": caption,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False
+        "text": text,
+        "disable_web_page_preview": False,
     }
-    response = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", data=payload)
-    if not response.ok:
-        logging.error("Telegram error: %s", response.text)
-    else:
-        logging.info("✅ Sent to Telegram.")
+    resp = requests.post(url, json=payload)
+    return resp.ok
 
-def run_bot(skip_posted_check=False, skip_time_check=False):
-    now = datetime.datetime.now()
-    if not (6 <= now.hour < 9):
-        if not skip_time_check:
-            logging.info("⏱️ Outside 6-9am window.")
-            return
-        else:
-            logging.info("⏱️ Time window override active (debug mode).")
 
-    game_pk = get_latest_game_pk()
-    if not game_pk:
-        return
-    logging.info("🧩 Latest completed gamePk: %s", game_pk)
-    if not skip_posted_check and has_been_posted(game_pk):
-        logging.info("📂 Already posted for this game.")
-        return
+@app.route('/')
+def index():
+    return "MLB Condensed Game Bot is running."
 
-    title, video_url = find_condensed_game_video(game_pk)
-    if not video_url:
-        logging.info("❌ No condensed game video found.")
-        return
 
-    logging.info("🎬 Found Condensed Game Video:\nTitle: %s\nURL: %s", title, video_url)
-    send_telegram_message(title, video_url)
-    mark_as_posted(game_pk)
-
-# --- Routes ---
-@app.route("/")
-def home():
-    return "Condensed Game Bot running!"
-
-@app.route("/debug")
+@app.route('/debug')
 def debug():
     key = request.args.get("key")
-    if key != BOT_KEY:
-        return "Forbidden", 403
-    logging.info("🚨 DEBUG MODE: Forcing post regardless of history.")
-    run_bot(skip_posted_check=True, skip_time_check=True)
-    return "Debug run complete."
+    force_condensed = request.args.get("force_condensed") == "true"
 
-@app.route("/reset")
-def reset():
-    key = request.args.get("reset")
-    if key != BOT_KEY:
-        return "Forbidden", 403
-    if os.path.exists(POSTED_FILE):
-        os.remove(POSTED_FILE)
-    return "posted_games.txt reset."
+    if key != DEBUG_KEY:
+        return "Unauthorized", 403
 
-@app.route("/ping")
-def ping():
-    return "OK"
+    if force_condensed:
+        logging.info("⚙️ Force-condensed mode triggered via debug endpoint.")
+        game_pk = get_recent_giants_game_pk()
+        if not game_pk:
+            return "No completed Giants games found in the last 3 days.", 200
+
+        video_url = get_condensed_game_url(game_pk)
+        if video_url:
+            posted = post_to_telegram(f"📽️ Giants Condensed Game:\n{video_url}")
+            return "Condensed game posted to Telegram." if posted else "Failed to post.", 200
+        return "Condensed game not found for that gamePk.", 200
+
+    return "Debug mode active, but no force_condensed flag provided.", 200
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000)
