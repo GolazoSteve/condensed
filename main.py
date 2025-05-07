@@ -1,4 +1,4 @@
-import os
+import os 
 import requests
 import logging
 import datetime
@@ -25,21 +25,25 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 # --- Helper Functions ---
 def get_latest_game_pk():
-    today = datetime.date.today().isoformat()
-    url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={today}"
-    response = requests.get(url)
-    if response.status_code != 200:
-        logging.error("Failed to fetch schedule data")
-        return None
-    games = response.json().get("dates", [])[0].get("games", [])
-    if not games:
-        logging.info("No games found for today")
-        return None
-    completed_games = [g for g in games if g.get("status", {}).get("detailedState") == "Final"]
-    if not completed_games:
-        logging.info("No completed games yet")
-        return None
-    return completed_games[-1].get("gamePk")
+    today = datetime.date.today()
+    yesterday = today - datetime.timedelta(days=1)
+    dates_to_check = [yesterday.isoformat(), today.isoformat()]
+
+    for date in dates_to_check:
+        url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={date}"
+        response = requests.get(url)
+        if response.status_code != 200:
+            logging.error("Failed to fetch schedule data for %s", date)
+            continue
+        games = response.json().get("dates", [])[0].get("games", [])
+        if not games:
+            logging.info("No games found for %s", date)
+            continue
+        completed_games = [g for g in games if g.get("status", {}).get("detailedState") == "Final"]
+        if completed_games:
+            return completed_games[-1].get("gamePk")
+    logging.info("No completed games found in last 2 days.")
+    return None
 
 def find_condensed_game_video(game_pk):
     url = f"https://statsapi.mlb.com/api/v1/game/{game_pk}/content"
