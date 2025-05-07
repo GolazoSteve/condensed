@@ -25,8 +25,7 @@ print("🎬 Condensed Game Bot: 6AM UK delivery")
 def get_latest_giants_gamepk():
     now_uk = datetime.now(ZoneInfo("Europe/London"))
     start_date = (now_uk - timedelta(days=3)).strftime("%Y-%m-%d")
-    end_date = (now_uk + timedelta(days=1)).strftime("%Y-%m-%d")  # Include future buffer
-
+    end_date = (now_uk + timedelta(days=1)).strftime("%Y-%m-%d")  # Future buffer included
     url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=137&startDate={start_date}&endDate={end_date}"
     res = requests.get(url)
     if res.status_code != 200:
@@ -133,29 +132,35 @@ app = Flask(__name__)
 @app.route('/')
 def home():
     now_uk = datetime.now(ZoneInfo("Europe/London"))
+
     if 6 <= now_uk.hour < 9:
         game_pk = get_latest_giants_gamepk()
         posted = get_posted_games()
 
-        if now_uk.hour == 7 and now_uk.minute == 0 and (not game_pk or str(game_pk) not in posted):
-            fallback_message = (
-                "🕖 No condensed game posted yet.\n"
-                "Might just be MLB being slow.\n"
-                f"<a href=\"https://your-app.onrender.com/debug?key={SECRET_KEY}\">🔧 Run debug manually</a>"
-            )
-            requests.post(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                data={
-                    "chat_id": CHAT_ID,
-                    "text": fallback_message,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True
-                }
-            )
-            logging.info("⚠️ Sent 7AM fallback Telegram message.")
+        if game_pk and str(game_pk) not in posted:
+            title, url = find_condensed_game_video(game_pk)
+            if not url and now_uk.hour in [7, 8] and now_uk.minute == 0:
+                fallback_message = (
+                    f"🕖 No condensed game posted yet ({now_uk.strftime('%-I:%M %p')}).\n"
+                    "Might just be MLB being slow.\n"
+                    f"<a href=\"https://your-app.onrender.com/debug?key={SECRET_KEY}\">🔧 Run debug manually</a>"
+                )
+                requests.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                    data={
+                        "chat_id": CHAT_ID,
+                        "text": fallback_message,
+                        "parse_mode": "HTML",
+                        "disable_web_page_preview": True
+                    }
+                )
+                logging.info(f"⚠️ Sent fallback Telegram message at {now_uk.strftime('%-I:%M %p')}.")
+            elif url:
+                run_bot()
         else:
-            run_bot()
+            logging.info("🛑 No new Giants game or already posted.")
         return "✅ Bot checked during 6–9AM window.\n"
+
     return "✅ Bot awake but outside scan window.\n"
 
 @app.route('/ping')
