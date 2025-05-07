@@ -1,127 +1,159 @@
 import os
 import requests
 import logging
-from flask import Flask, request, abort
-from bs4 import BeautifulSoup
+import datetime
 import smtplib
+from flask import Flask, request
+from bs4 import BeautifulSoup
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
 
-load_dotenv()
-
-app = Flask(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-MLB_API_BASE = "https://statsapi.mlb.com/api/v1"
-TEAM_ID = 137  # Giants
-
+# --- Config ---
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 EMAIL_SENDER = os.getenv("EMAIL_SENDER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-EMAIL_RECEIVER = os.getenv("EMAIL_RECEIVER")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-DEBUG_KEY = os.getenv("DEBUG_KEY", "go_sfg")
+EMAIL_BCC = os.getenv("EMAIL_BCC", "").split(",")
+BOT_KEY = os.getenv("BOT_KEY") or "go_sfg"
+POSTED_FILE = "posted_games.txt"
 
-def get_schedule(date_str):
-    url = f"{MLB_API_BASE}/schedule?sportId=1&date={date_str}"
-    resp = requests.get(url)
-    if not resp.ok:
-        return []
-    return resp.json().get("dates", [])[0].get("games", [])
+# --- Flask App ---
+app = Flask(__name__)
 
-def get_game_video_page(game_pk):
-    return f"https://www.mlb.com/gameday/{game_pk}/video"
+# --- Logging ---
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-def find_condensed_game_url(game_pk):
-    video_page = get_game_video_page(game_pk)
-    resp = requests.get(video_page)
-    if not resp.ok:
-        return None, None
-    soup = BeautifulSoup(resp.text, "html.parser")
-    for script in soup.find_all("script"):
-        if "Condensed Game" in script.text and ".mp4" in script.text:
-            text = script.text
-            title_start = text.find("Condensed Game")
-            title = text[title_start:text.find('"', title_start)]
-            start = text.find("https://", text.find(".mp4") - 300)
-            end = text.find(".mp4", start) + 4
-            url = text[start:end]
-            return title, url
-    return None, None
+# --- Helper Functions ---
+def get_latest_game_pk():
+    today = datetime.date.today().isoformat()
+    url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={today}"
+    response = requests.get(url)
+    if response.status_code != 200:
+        logging.error("Failed to fetch schedule data")
+        return None
+    games = response.json().get("dates", [])[0].get("games", [])
+    if not games:
+        logging.info("No games found for today")
+        return None
+    completed_games = [g for g in games if g.get("status", {}).get("detailedState") == "Final"]
+    if not completed_games:
+        logging.info("No completed games yet")
+        return None
+    return completed_games[-1].get("gamePk")
 
-def send_email(subject, body):
-    try:
-        msg = MIMEText(body)
-        msg["Subject"] = subject
-        msg["From"] = EMAIL_SENDER
-        msg["To"] = EMAIL_RECEIVER
-        server = smtplib.SMTP_SSL("smtp.gmail.com", 465)
+def find_condensed_game_video(game_pk):
+    url = f"https://statsapi.mlb.com/api/v1/game/{game_pk}/content"
+    response = requests.get(url)
+    if response.status_code != 200:
+        logging.error("Failed to fetch content for gamePk %s", game_pk)
+        return None, None, None
+    data = response.json()
+    videos = data.get("highlights", {}).get("highlights", {}).get("items", [])
+    for video in videos:
+        title = video.get("title", "").lower()
+        description = video.get("description", "").lower()
+        if "condensed" in title or "condensed" in description:
+            for playback in video.get("playbacks", []):
+                if "1280x720" in playback.get("url", ""):
+                    return video.get("title"), playback.get("url"), video.get("image")
+    return None, None, None
+
+def has_been_posted(game_pk):
+    if not os.path.exists(POSTED_FILE):
+        return False
+    with open(POSTED_FILE, "r") as f:
+        return str(game_pk) in f.read()
+
+def mark_as_posted(game_pk):
+    with open(POSTED_FILE, "a") as f:
+        f.write(f"{game_pk}\n")
+
+def send_telegram_message(title, video_url, image_url=None):
+    caption = f"📼 {title.replace('Condensed Game: ', '')}\n" + "─"*28 + "\n🎥 ▶ Watch Condensed Game\n\nEvery outfield assist feels fresher before 8 a.m."
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "caption": caption,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": False
+    }
+    if image_url:
+        payload["photo"] = image_url
+        endpoint = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    else:
+        payload["text"] = caption + f"\n{video_url}"
+        endpoint = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    response = requests.post(endpoint, data=payload)
+    if not response.ok:
+        logging.error("Telegram error: %s", response.text)
+    else:
+        logging.info("✅ Sent to Telegram.")
+
+def send_email(subject, video_url, image_url=None):
+    msg = MIMEMultipart()
+    msg['From'] = EMAIL_SENDER
+    msg['To'] = EMAIL_SENDER
+    msg['Subject'] = subject
+    if EMAIL_BCC:
+        msg['Bcc'] = ", ".join(EMAIL_BCC)
+    body = f"<h2>{subject}</h2><p><a href=\"{video_url}\">Watch the condensed game</a></p>"
+    if image_url:
+        body += f"<p><img src=\"{image_url}\" width=\"480\"></p>"
+    msg.attach(MIMEText(body, 'html'))
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
         server.login(EMAIL_SENDER, EMAIL_PASSWORD)
         server.send_message(msg)
-        server.quit()
         logging.info("📧 Email sent.")
-    except Exception as e:
-        logging.error(f"Email error: {e}")
 
-def send_telegram(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message}
-    response = requests.post(url, json=payload)
-    if not response.ok:
-        logging.error(f"Telegram error: {response.text}")
+def run_bot(skip_posted_check=False, skip_time_check=False):
+    now = datetime.datetime.now()
+    if not (6 <= now.hour < 9):
+        if not skip_time_check:
+            logging.info("⏱️ Outside 6-9am window.")
+            return
+        else:
+            logging.info("⏱️ Time window override active (debug mode).")
 
-def find_latest_game_with_video(force_any_team=False):
-    today = datetime.now()
-    for delta in range(0, 5):
-        date_str = (today - timedelta(days=delta)).strftime("%Y-%m-%d")
-        games = get_schedule(date_str)
-        if not games:
-            continue
-        for game in reversed(games):  # Check latest first
-            if not force_any_team and game.get("teams", {}).get("away", {}).get("team", {}).get("id") != TEAM_ID \
-               and game.get("teams", {}).get("home", {}).get("team", {}).get("id") != TEAM_ID:
-                continue
-            game_pk = game.get("gamePk")
-            title, video_url = find_condensed_game_url(game_pk)
-            if title and video_url:
-                logging.info(f"🎬 Found Condensed Game Video:\nTitle: {title}\nURL: {video_url}")
-                return title, video_url
-    logging.info("❌ No condensed game found for any game.")
-    return None, None
+    game_pk = get_latest_game_pk()
+    if not game_pk:
+        return
+    logging.info("🧩 Latest completed gamePk: %s", game_pk)
+    if not skip_posted_check and has_been_posted(game_pk):
+        logging.info("📂 Already posted for this game.")
+        return
 
-def run_bot(force_all=False):
-    logging.info("🚨 FORCE MODE: Ignoring posted date check." if force_all else "🧪 DEBUG MODE: Forcing post regardless of history.")
-    title, video_url = find_latest_game_with_video(force_any_team=force_all)
-    if title and video_url:
-        send_telegram(f"{title}\n{video_url}")
-        send_email(title, video_url)
-    else:
-        logging.info("No suitable condensed video found.")
+    title, video_url, image_url = find_condensed_game_video(game_pk)
+    if not video_url:
+        logging.info("❌ No condensed game video found.")
+        return
 
+    logging.info("🎬 Found Condensed Game Video:\nTitle: %s\nURL: %s", title, video_url)
+    send_telegram_message(title, video_url, image_url)
+    send_email(title, video_url, image_url)
+    mark_as_posted(game_pk)
+
+# --- Routes ---
 @app.route("/")
-def root():
-    if request.args.get("reset") == DEBUG_KEY:
-        return "🔁 Reset received", 200
-    return "🎯 Breakfast Bot: Giants Highlights @ 6AM UK daily", 200
-
-@app.route("/ping")
-def ping():
-    return "", 200
+def home():
+    return "Condensed Game Bot running!"
 
 @app.route("/debug")
 def debug():
-    if request.args.get("key") != DEBUG_KEY:
-        abort(403)
-    run_bot(force_all=False)
-    return "✅ Debug complete", 200
+    key = request.args.get("key")
+    if key != BOT_KEY:
+        return "Forbidden", 403
+    logging.info("🚨 DEBUG MODE: Forcing post regardless of history.")
+    run_bot(skip_posted_check=True, skip_time_check=True)
+    return "Debug run complete."
 
-@app.route("/force")
-def force():
-    if request.args.get("key") != DEBUG_KEY:
-        abort(403)
-    run_bot(force_all=True)
-    return "✅ Forced post complete", 200
+@app.route("/reset")
+def reset():
+    key = request.args.get("reset")
+    if key != BOT_KEY:
+        return "Forbidden", 403
+    if os.path.exists(POSTED_FILE):
+        os.remove(POSTED_FILE)
+    return "posted_games.txt reset."
 
-if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+@app.route("/ping")
+def ping():
+    return "OK"
