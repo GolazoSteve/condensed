@@ -1,4 +1,4 @@
-import os 
+import os
 import requests
 import logging
 import datetime
@@ -25,22 +25,21 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 # --- Helper Functions ---
 def get_latest_game_pk():
-    for offset in [0, -1]:  # Try today first, then yesterday
-        date = (datetime.date.today() + datetime.timedelta(days=offset)).isoformat()
-        url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={date}"
-        response = requests.get(url)
-        if response.status_code != 200:
-            logging.error("Failed to fetch schedule data for %s", date)
-            continue
-        games = response.json().get("dates", [])[0].get("games", [])
-        if not games:
-            logging.info("No games found for %s", date)
-            continue
-        completed_games = [g for g in games if g.get("status", {}).get("detailedState") == "Final"]
-        if completed_games:
-            return completed_games[-1].get("gamePk")
-    logging.info("No completed games found today or yesterday")
-    return None
+    today = datetime.date.today().isoformat()
+    url = f"https://statsapi.mlb.com/api/v1/schedule/games/?sportId=1&date={today}"
+    response = requests.get(url)
+    if response.status_code != 200:
+        logging.error("Failed to fetch schedule data")
+        return None
+    games = response.json().get("dates", [])[0].get("games", [])
+    if not games:
+        logging.info("No games found for today")
+        return None
+    completed_games = [g for g in games if g.get("status", {}).get("detailedState") == "Final"]
+    if not completed_games:
+        logging.info("No completed games yet")
+        return None
+    return completed_games[-1].get("gamePk")
 
 def find_condensed_game_video(game_pk):
     url = f"https://statsapi.mlb.com/api/v1/game/{game_pk}/content"
@@ -70,10 +69,10 @@ def mark_as_posted(game_pk):
         f.write(f"{game_pk}\n")
 
 def send_telegram_message(title, video_url):
-    caption = f"📼 {title.replace('Condensed Game: ', '')}\n" + "─"*28 + "\n🎥 ▶ Watch Condensed Game\n\nEvery outfield assist feels fresher before 8 a.m.\n{video_url}"
+    message = f"📼 {title.replace('Condensed Game: ', '')}\n" + "─"*28 + f"\n🎥 ▶ Watch Condensed Game:\n{video_url}\n\nEvery outfield assist feels fresher before 8 a.m."
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": caption,
+        "text": message,
         "parse_mode": "HTML",
         "disable_web_page_preview": False
     }
