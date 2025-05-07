@@ -25,7 +25,8 @@ print("🎬 Condensed Game Bot: 6AM UK delivery")
 def get_latest_giants_gamepk():
     now_uk = datetime.now(ZoneInfo("Europe/London"))
     start_date = (now_uk - timedelta(days=3)).strftime("%Y-%m-%d")
-    end_date = now_uk.strftime("%Y-%m-%d")
+    end_date = (now_uk + timedelta(days=1)).strftime("%Y-%m-%d")  # Include future buffer
+
     url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&teamId=137&startDate={start_date}&endDate={end_date}"
     res = requests.get(url)
     if res.status_code != 200:
